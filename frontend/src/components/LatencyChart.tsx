@@ -1,5 +1,11 @@
 import { useMemo } from "react";
 import type { ProbeSample, RollupPoint } from "../types";
+import {
+  buildTimeAxisTicks,
+  getSmoothingWindow,
+  smoothPoints,
+  toPlottedPoints,
+} from "../utils/format";
 
 const RANGE_OPTIONS = [
   { label: "1h", hours: 1 },
@@ -23,19 +29,7 @@ export function LatencyChart({
   seriesMode,
   series,
 }: LatencyChartProps) {
-  const chartPoints = useMemo(() => {
-    return series
-      .map((pt) => {
-        const val =
-          "avg_ms" in pt && pt.avg_ms !== null
-            ? pt.avg_ms
-            : "total_ms" in pt && pt.total_ms !== null
-              ? pt.total_ms
-              : 0;
-        return { ts: pt.ts, ms: Number(val) };
-      })
-      .filter((p) => Number.isFinite(p.ms));
-  }, [series]);
+  const chartPoints = useMemo(() => toPlottedPoints(series), [series]);
 
   const chartStats = useMemo(() => {
     if (!chartPoints.length) {
@@ -50,30 +44,47 @@ export function LatencyChart({
 
   const chartGeometry = useMemo(() => {
     const width = 760;
-    const height = 130;
+    const height = 156;
     const padX = 12;
     const padTop = 18;
-    const padBottom = 18;
+    const padBottom = 34;
+    const plotBottom = height - padBottom;
     const span = Math.max(1, chartStats.maxMs - chartStats.minMs);
 
+    const windowDurationMs = Math.max(1, rangeHours) * 60 * 60 * 1000;
+    const latestPointMs =
+      chartPoints.length > 0
+        ? Math.max(...chartPoints.map((p) => p.tsMs))
+        : Date.now();
+    const endMs = Math.max(Date.now(), latestPointMs);
+    const startMs = endMs - windowDurationMs;
+
+    const toX = (tsMs: number) => {
+      const ratio = (tsMs - startMs) / windowDurationMs;
+      const clamped = Math.max(0, Math.min(1, ratio));
+      return padX + clamped * (width - padX * 2);
+    };
+
     const toY = (ms: number) =>
-      height -
-      padBottom -
-      ((ms - chartStats.minMs) / span) * (height - padTop - padBottom);
+      plotBottom - ((ms - chartStats.minMs) / span) * (plotBottom - padTop);
+
+    const visiblePoints = chartPoints.filter(
+      (p) => p.tsMs >= startMs && p.tsMs <= endMs
+    );
+    const renderedPoints = smoothPoints(
+      visiblePoints,
+      getSmoothingWindow(rangeHours)
+    );
 
     const polylinePoints =
-      chartPoints.length >= 2
-        ? chartPoints
-            .map((p, idx) => {
-              const x =
-                padX + (idx / (chartPoints.length - 1)) * (width - padX * 2);
-              const y = toY(p.ms);
-              return `${x.toFixed(1)},${y.toFixed(1)}`;
-            })
+      renderedPoints.length >= 2
+        ? renderedPoints
+            .map((p) => `${toX(p.tsMs).toFixed(1)},${toY(p.ms).toFixed(1)}`)
             .join(" ")
         : "";
 
     const avgY = toY(chartStats.avgMs).toFixed(1);
+    const ticks = buildTimeAxisTicks(startMs, endMs, rangeHours, toX);
 
     return {
       width,
@@ -81,10 +92,12 @@ export function LatencyChart({
       padX,
       padTop,
       padBottom,
+      plotBottom,
       polylinePoints,
       avgY,
+      ticks,
     };
-  }, [chartPoints, chartStats]);
+  }, [chartPoints, chartStats, rangeHours]);
 
   return (
     <section className="panel-card">
@@ -134,7 +147,7 @@ export function LatencyChart({
             </text>
             <text
               x={chartGeometry.padX}
-              y={chartGeometry.height - 4}
+              y={chartGeometry.plotBottom - 5}
               className="chart-ref-label"
             >
               min {Math.round(chartStats.minMs)} ms
@@ -143,6 +156,47 @@ export function LatencyChart({
               className="chart-line"
               points={chartGeometry.polylinePoints}
             />
+
+            <line
+              x1={chartGeometry.padX}
+              y1={chartGeometry.plotBottom}
+              x2={chartGeometry.width - chartGeometry.padX}
+              y2={chartGeometry.plotBottom}
+              stroke="#334155"
+              strokeWidth={1}
+            />
+
+            {chartGeometry.ticks.map((tick) => {
+              const tickLen = tick.isMajor ? 8 : 4;
+              const anchor =
+                tick.x < chartGeometry.padX + 28
+                  ? "start"
+                  : tick.x > chartGeometry.width - chartGeometry.padX - 28
+                    ? "end"
+                    : "middle";
+              return (
+                <g key={tick.ms}>
+                  <line
+                    x1={tick.x}
+                    x2={tick.x}
+                    y1={chartGeometry.plotBottom}
+                    y2={chartGeometry.plotBottom + tickLen}
+                    stroke={tick.isMajor ? "#64748b" : "#334155"}
+                    strokeWidth={tick.isMajor ? 1.25 : 1}
+                  />
+                  {tick.label && (
+                    <text
+                      x={tick.x}
+                      y={chartGeometry.plotBottom + 20}
+                      textAnchor={anchor}
+                      className="chart-ref-label"
+                    >
+                      {tick.label}
+                    </text>
+                  )}
+                </g>
+              );
+            })}
           </svg>
         ) : (
           <div className="chart-empty">
